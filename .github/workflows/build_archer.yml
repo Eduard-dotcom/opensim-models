@@ -1,144 +1,247 @@
-name: Build Archer Hybrid Model
+name: Analyze & Build Archer Model
 
 on:
   workflow_dispatch:
     inputs:
-      version_name:
-        description: 'Имя выходного файла (без .osim)'
+      mode:
+        description: 'Режим работы: analyze (только анализ) или merge (слияние)'
         required: true
-        default: 'Archer_Hybrid_v2'
+        default: 'analyze'
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Скачиваем репозиторий (используем свежую версию)
+      # 1. Скачиваем репозиторий
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2. Устанавливаем Python (свежая версия)
+      # 2. Устанавливаем Python и утилиты для распаковки 7z
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.9'
 
-      # 3. Создаем и запускаем скрипт
-      - name: Run Merge Logic
-        id: merge_step
+      - name: Install 7zip and Git tools
         run: |
-          python3 << 'EOF'
-          import os
-          import re
-          import sys
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full git
 
-          M7_FILE = "M7_18_Baza.osim"
-          M8_FILE = "M8_Caruthers_Scaled_Arms_Corrected_1.osim"
-          version = os.environ.get('INPUT_VERSION_NAME', 'Archer_Hybrid_v2')
-          OUT_FILE = f"{version}.osim"
+      # 3. Распаковываем документацию
+      - name: Unpack Documentation
+        run: |
+          if [ -f "doc.7z" ]; then
+            7z x doc.7z -odocs
+            echo "Documentation unpacked to ./docs"
+            ls -R docs | head -n 20
+          else
+            echo "WARNING: doc.7z not found in root. Skipping documentation analysis."
+          fi
 
-          print(f"--- Starting Build: {OUT_FILE} ---")
+      # 4. Создаем и запускаем скрипт анализа/слияния
+      - name: Run Analysis/Merge Script
+        run: |
+          cat > main_script.py << 'PYTHON_SCRIPT_EOF'
+import os
+import re
+import xml.etree.ElementTree as ET
 
-          if not os.path.exists(M7_FILE):
-              print(f"ERROR: {M7_FILE} not found!")
-              sys.exit(1)
-          if not os.path.exists(M8_FILE):
-              print(f"ERROR: {M8_FILE} not found!")
-              sys.exit(1)
+# Конфигурация
+M7_FILE = "M7_18_Baza.osim"
+M8_FILE = "M8_Caruthers_FullBodyModel2016_Scaled_Arms_Corrected.osim"
+DOCS_DIR = "docs"
+MODE = os.environ.get('INPUT_MODE', 'analyze')
+REPORT_FILE = "analysis_report.txt"
+OUTPUT_MODEL = "Archer_Hybrid_v1.osim"
 
-          with open(M7_FILE, 'r') as f: m7 = f.read()
-          with open(M8_FILE, 'r') as f: m8 = f.read()
+def log(msg):
+    print(msg)
+    with open(REPORT_FILE, 'a', encoding='utf-8') as f:
+        f.write(msg + "\n")
 
-          # --- ЛОГИКА ---
-          bodies_remove_m7 = ['sacrum', 'pelvis', 'femur_r', 'femur_l', 'tibia_r', 'tibia_l', 
-                              'talus_r', 'talus_l', 'calcn_r', 'calcn_l', 'toes_r', 'toes_l', 'patella_r', 'patella_l']
-          
-          clean_m7 = m7
-          for b in bodies_remove_m7:
-              pattern = r'<Body\s+name="' + b + r'".*?</Body>'
-              if re.search(pattern, clean_m7, flags=re.DOTALL):
-                  clean_m7 = re.sub(pattern, '', clean_m7, flags=re.DOTALL)
-                  print(f"Removed from M7: {b}")
-              else:
-                  print(f"Warning: Body '{b}' not found in M7 to remove.")
+def parse_bodies_and_joints(filepath):
+    """Извлекает список тел и их родительские суставы."""
+    bodies = {}
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Поиск всех тел
+        # Ищем паттерн <Body name="..."> ... </Body>
+        # Внутри тела ищем <Joint>...</Joint> чтобы определить родителя
+        body_pattern = r'<Body\s+name="([^"]+)">(.*?)</Body>'
+        matches = re.findall(body_pattern, content, re.DOTALL)
+        
+        for name, body_content in matches:
+            parent_body = "ground" # По умолчанию
+            joint_type = "Unknown"
+            
+            # Ищем сустав внутри тела
+            joint_match = re.search(r'<(\w+)Joint\s+name="([^"]+)".*?<parent_body>([^<]+)</parent_body>', body_content, re.DOTALL)
+            if joint_match:
+                joint_type = joint_match.group(1) + "Joint"
+                parent_body = joint_match.group(3)
+            
+            bodies[name] = {
+                "parent": parent_body,
+                "joint_type": joint_type
+            }
+            
+        return bodies
+    except Exception as e:
+        return {"error": str(e)}
 
-          joints_remove_m7 = ['ground_pelvis', 'pelvis_sacrum', 'hip_r', 'hip_l', 'knee_r', 'knee_l', 
-                              'ankle_r', 'ankle_l', 'subtalar_r', 'subtalar_l', 'mtp_r', 'mtp_l']
-          for j in joints_remove_m7:
-              pattern = r'<\w+Joint\s+name="' + j + r'".*?</\w+Joint>'
-              clean_m7 = re.sub(pattern, '', clean_m7, flags=re.DOTALL)
+def parse_muscles(filepath):
+    """Извлекает мышцы и их точки крепления."""
+    muscles = []
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Упрощенный поиск мышц
+        muscle_pattern = r'<(\w+)\s+name="([^"]+)".*?</\1>'
+        # Ищем блоки MuscleSet -> objects -> Muscle
+        # Это сложная структура, сделаем упрощенный парсинг по именам и путям
+        
+        # Найдем секцию MuscleSet
+        muscle_set_match = re.search(r'<MuscleSet>(.*?)</MuscleSet>', content, re.DOTALL)
+        if muscle_set_match:
+            muscle_content = muscle_set_match.group(1)
+            # Ищем имена мышц
+            names = re.findall(r'<\w+\s+name="([^"]+)"', muscle_content)
+            # Для отчета просто посчитаем количество уникальных имен в блоке мышц
+            # Более глубокий парсинг путей требует полноценного XML парсера с namespaces, 
+            # но для отчета достаточно имен и проверки наличия ключевых точек
+            
+            muscles = list(set(names))
+            
+        return muscles
+    except Exception as e:
+        return ["Error: " + str(e)]
 
-          bodies_keep_m8 = ['pelvis', 'sacrum', 'femur_r', 'femur_l', 'tibia_r', 'tibia_l', 
-                            'talus_r', 'talus_l', 'calcn_r', 'calcn_l', 'toes_r', 'toes_l', 'patella_r', 'patella_l']
-          
-          extracted_bodies = ""
-          for b in bodies_keep_m8:
-              match = re.search(r'(<Body\s+name="' + b + r'".*?</Body>)', m8, re.DOTALL)
-              if match:
-                  extracted_bodies += "\n\t\t\t" + match.group(1)
-                  print(f"Extracted from M8: {b}")
-              else:
-                  print(f"Warning: Body '{b}' not found in M8.")
+def check_docs():
+    """Проверяет наличие документации."""
+    if os.path.exists(DOCS_DIR):
+        files = os.listdir(DOCS_DIR)
+        return f"Found {len(files)} items in docs folder. Sample: {files[:5]}"
+    else:
+        return "Documentation folder NOT found."
 
-          joints_keep_m8 = ['ground_pelvis', 'pelvis_sacrum', 'hip_r', 'hip_l', 'knee_r', 'knee_l', 
-                            'ankle_r', 'ankle_l', 'subtalar_r', 'subtalar_l', 'mtp_r', 'mtp_l']
-          
-          extracted_joints = ""
-          for j in joints_keep_m8:
-              found = False
-              for tag in ['CustomJoint', 'WeldJoint', 'PinJoint', 'BallJoint']:
-                  match = re.search(r'(<' + tag + r'\s+name="' + j + r'".*?</' + tag + r'>)', m8, re.DOTALL)
-                  if match:
-                      extracted_joints += "\n\t\t\t" + match.group(1)
-                      print(f"Extracted joint from M8: {j}")
-                      found = True
-                      break
-              if not found:
-                  print(f"Warning: Joint '{j}' not found in M8.")
+def main():
+    # Очистка отчета
+    if os.path.exists(REPORT_FILE):
+        os.remove(REPORT_FILE)
+    
+    log("="*60)
+    log(f"OPENSIM MODEL ANALYSIS & MERGE TOOL (Mode: {MODE})")
+    log("="*60)
+    
+    # 1. Проверка файлов
+    log("\n[STEP 1] Checking input files...")
+    if not os.path.exists(M7_FILE):
+        log(f"ERROR: {M7_FILE} not found!")
+        return
+    else:
+        log(f"OK: {M7_FILE} found.")
+        
+    if not os.path.exists(M8_FILE):
+        log(f"ERROR: {M8_FILE} not found!")
+        return
+    else:
+        log(f"OK: {M8_FILE} found.")
 
-          final_model = clean_m7
-          
-          if "</BodySet>" in final_model:
-              final_model = final_model.replace("</BodySet>", extracted_bodies + "\n\t\t</BodySet>")
-              print("Injected BodySet.")
-          else:
-              print("ERROR: </BodySet> tag not found in M7!")
-              sys.exit(1)
-              
-          if "</JointSet>" in final_model:
-              final_model = final_model.replace("</JointSet>", extracted_joints + "\n\t\t</JointSet>")
-              print("Injected JointSet.")
-          else:
-              print("ERROR: </JointSet> tag not found in M7!")
-              sys.exit(1)
+    # 2. Проверка документации
+    log("\n[STEP 2] Checking Documentation...")
+    log(check_docs())
 
-          with open(OUT_FILE, 'w') as f:
-              f.write(final_model)
-          
-          if os.path.exists(OUT_FILE):
-              size = os.path.getsize(OUT_FILE)
-              print(f"SUCCESS! Created {OUT_FILE} ({size} bytes)")
-              # Создаем файл-флаг, чтобы следующий шаг знал, что всё ок
-              with open("build_success.flag", "w") as f:
-                  f.write("OK")
-          else:
-              print("ERROR: File was not created!")
-              sys.exit(1)
-          EOF
+    # 3. Анализ структур (ЭТАП 1)
+    log("\n[STEP 3] Analyzing Body & Joint Structures...")
+    
+    log("\n--- MODEL M7 (Teen/18yo) ---")
+    m7_data = parse_bodies_and_joints(M7_FILE)
+    if "error" in m7_data:
+        log(f"Parse Error M7: {m7_data['error']}")
+    else:
+        log(f"Total Bodies: {len(m7_data)}")
+        log("Key Chain (Ground up):")
+        # Пытаемся восстановить цепочку от ground
+        # Ищем кто ребенок ground
+        children_of_ground = [k for k, v in m7_data.items() if v['parent'] == 'ground']
+        log(f"  Ground -> {children_of_ground}")
+        
+        # Особое внимание стыку L5-S1
+        if 'lumbar5' in m7_data:
+            l5 = m7_data['lumbar5']
+            log(f"  Body 'lumbar5': Parent={l5['parent']}, JointType={l5['joint_type']}")
+        if 'sacrum' in m7_data:
+            sac = m7_data['sacrum']
+            log(f"  Body 'sacrum': Parent={sac['parent']}, JointType={sac['joint_type']}")
 
-      # 4. Коммит и пуш (только если файл создан)
-      - name: Commit and Push Result
-        if: steps.merge_step.outcome == 'success'
+    log("\n--- MODEL M8 (Adult/Caruthers) ---")
+    m8_data = parse_bodies_and_joints(M8_FILE)
+    if "error" in m8_data:
+        log(f"Parse Error M8: {m8_data['error']}")
+    else:
+        log(f"Total Bodies: {len(m8_data)}")
+        children_of_ground = [k for k, v in m8_data.items() if v['parent'] == 'ground']
+        log(f"  Ground -> {children_of_ground}")
+        
+        if 'lumbar5' in m8_data:
+            l5 = m8_data['lumbar5']
+            log(f"  Body 'lumbar5': Parent={l5['parent']}, JointType={l5['joint_type']}")
+        if 'sacrum' in m8_data:
+            sac = m8_data['sacrum']
+            log(f"  Body 'sacrum': Parent={sac['parent']}, JointType={sac['joint_type']}")
+
+    # 4. Анализ мышц (ЭТАП 2 - упрощенный)
+    log("\n[STEP 4] Analyzing Muscle Sets...")
+    m7_muscles = parse_muscles(M7_FILE)
+    m8_muscles = parse_muscles(M8_FILE)
+    log(f"M7 Muscles count: {len(m7_muscles)}")
+    log(f"M8 Muscles count: {len(m8_muscles)}")
+    
+    # Проверка ключевых мышц для стыка
+    key_muscles = ['psoas', 'glut_max', 'erector_spinae']
+    log("Checking key muscles near junction:")
+    for km in key_muscles:
+        in_m7 = any(km.lower() in m.lower() for m in m7_muscles)
+        in_m8 = any(km.lower() in m.lower() for m in m8_muscles)
+        log(f"  {km}: M7={in_m7}, M8={in_m8}")
+
+    # 5. Логика слияния (если режим merge)
+    if MODE == 'merge':
+        log("\n[STEP 5] STARTING MERGE PROCESS...")
+        log("WARNING: Full merge logic implementation requires complex XML manipulation.")
+        log("For this run, only analysis report is generated to verify structure compatibility.")
+        log("Please review the report above. If structures match expectations, we will implement the full XML splicer in the next iteration.")
+        
+        # Здесь в будущем будет код для реального объединения XML
+        # Сейчас мы просто создадим пустой файл-заглушку, чтобы пайплайн не упал,
+        # но лучше оставить это на следующий шаг после утверждения отчета.
+        
+    log("\n" + "="*60)
+    log("ANALYSIS COMPLETE. Check logs or download report file.")
+    log("="*60)
+
+if __name__ == "__main__":
+    main()
+PYTHON_SCRIPT_EOF
+
+          python3 main_script.py
+
+      # 5. Коммит отчета (и будущей модели)
+      - name: Configure Git
         run: |
           git config --global user.name "GitHub Actions Bot"
           git config --global user.email "actions@github.com"
-          
-          git add *.osim
-          
+
+      - name: Commit Results
+        run: |
+          git add -A
           if git diff-index --quiet HEAD --; then
             echo "No changes to commit."
-            exit 0
+          else
+            git commit -m "Auto-analysis: Added report and prepared for merge"
+            git push
           fi
-          
-          git commit -m "Auto-build: Generated ${{ github.event.inputs.version_name }}.osim"
-          git push
