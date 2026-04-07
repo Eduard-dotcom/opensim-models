@@ -1,6 +1,5 @@
 name: Build Archer Hybrid Model
 
-# Запуск по кнопке вручную
 on:
   workflow_dispatch:
     inputs:
@@ -14,45 +13,37 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Скачиваем твой репозиторий со всеми моделями
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4  # Обновлено до v4
+        with:
+          fetch-depth: 0 # Скачиваем всю историю, чтобы git работал корректно
 
-      # 2. Устанавливаем Python
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5  # Обновлено до v5
         with:
           python-version: '3.9'
 
-      # 3. Создаем скрипт объединения прямо на лету
       - name: Create Merge Script
         run: |
           cat > merge_script.py << 'EOF'
           import os
           import re
 
-          # Пути к файлам в репозитории
           M7_FILE = "M7_18_Baza.osim"
           M8_FILE = "M8_Caruthers_Scaled_Arms_Corrected_1.osim"
-          
-          # Получаем имя выходного файла из ввода пользователя
           version = os.environ.get('INPUT_VERSION_NAME', 'Archer_Hybrid_v2')
           OUT_FILE = f"{version}.osim"
 
           print(f"--- Starting Build: {OUT_FILE} ---")
 
           if not os.path.exists(M7_FILE):
-              raise Exception(f"Error: {M7_FILE} not found in repo!")
+              raise Exception(f"Error: {M7_FILE} not found!")
           if not os.path.exists(M8_FILE):
-              raise Exception(f"Error: {M8_FILE} not found in repo!")
+              raise Exception(f"Error: {M8_FILE} not found!")
 
           with open(M7_FILE, 'r') as f: m7 = f.read()
           with open(M8_FILE, 'r') as f: m8 = f.read()
 
-          # --- ЛОГИКА ОБЪЕДИНЕНИЯ ---
-          
-          # 1. Чистим M7 (удаляем низ: таз, ноги)
-          # Оставляем всё до lumbar5 включительно.
           bodies_remove_m7 = ['sacrum', 'pelvis', 'femur_r', 'femur_l', 'tibia_r', 'tibia_l', 
                               'talus_r', 'talus_l', 'calcn_r', 'calcn_l', 'toes_r', 'toes_l', 'patella_r', 'patella_l']
           
@@ -60,70 +51,63 @@ jobs:
           for b in bodies_remove_m7:
               pattern = r'<Body\s+name="' + b + r'".*?</Body>'
               clean_m7 = re.sub(pattern, '', clean_m7, flags=re.DOTALL)
-              print(f"Removed form M7: {b}")
 
-          # Удаляем суставы низа из M7
           joints_remove_m7 = ['ground_pelvis', 'pelvis_sacrum', 'hip_r', 'hip_l', 'knee_r', 'knee_l', 
                               'ankle_r', 'ankle_l', 'subtalar_r', 'subtalar_l', 'mtp_r', 'mtp_l']
           for j in joints_remove_m7:
               pattern = r'<\w+Joint\s+name="' + j + r'".*?</\w+Joint>'
               clean_m7 = re.sub(pattern, '', clean_m7, flags=re.DOTALL)
 
-          # 2. Вырезаем низ из M8 (таз, ноги, крестец)
-          # Нам нужны: pelvis, sacrum и ноги.
           bodies_keep_m8 = ['pelvis', 'sacrum', 'femur_r', 'femur_l', 'tibia_r', 'tibia_l', 
                             'talus_r', 'talus_l', 'calcn_r', 'calcn_l', 'toes_r', 'toes_l', 'patella_r', 'patella_l']
           
           extracted_bodies = ""
           for b in bodies_keep_m8:
-              # Ищем блок Body
               match = re.search(r'(<Body\s+name="' + b + r'".*?</Body>)', m8, re.DOTALL)
               if match:
                   extracted_bodies += "\n\t\t\t" + match.group(1)
-                  print(f"Extracted from M8: {b}")
 
           joints_keep_m8 = ['ground_pelvis', 'pelvis_sacrum', 'hip_r', 'hip_l', 'knee_r', 'knee_l', 
                             'ankle_r', 'ankle_l', 'subtalar_r', 'subtalar_l', 'mtp_r', 'mtp_l']
           
           extracted_joints = ""
           for j in joints_keep_m8:
-              # Ищем разные типы суставов
               for tag in ['CustomJoint', 'WeldJoint', 'PinJoint', 'BallJoint']:
                   match = re.search(r'(<' + tag + r'\s+name="' + j + r'".*?</' + tag + r'>)', m8, re.DOTALL)
                   if match:
                       extracted_joints += "\n\t\t\t" + match.group(1)
-                      print(f"Extracted joint from M8: {j}")
                       break
 
-          # 3. СБОРКА
-          # Вставляем тела и суставы из M8 в очищенный M7
           final_model = clean_m7
-          
           if "</BodySet>" in final_model:
               final_model = final_model.replace("</BodySet>", extracted_bodies + "\n\t\t</BodySet>")
-          else:
-              raise Exception("Could not find </BodySet> in M7")
-              
           if "</JointSet>" in final_model:
               final_model = final_model.replace("</JointSet>", extracted_joints + "\n\t\t</JointSet>")
-          else:
-              raise Exception("Could not find </JointSet> in M7")
 
-          # 4. Сохранение
           with open(OUT_FILE, 'w') as f:
               f.write(final_model)
-          
           print(f"SUCCESS! Created {OUT_FILE}")
           EOF
 
-      # 4. Запускаем скрипт
       - name: Run Merge Script
         run: python merge_script.py
 
-      # 5. Сохраняем результат обратно в репозиторий
+      - name: Configure Git User
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+
       - name: Commit and Push Result
-        uses: stefanzweifel/git-auto-commit-action@v4
-        with:
-          commit_message: "Auto-build: Generated ${{ github.event.inputs.version_name }}.osim"
-          file_pattern: "*.osim"
-          branch: main
+        run: |
+          # Явно добавляем файл
+          git add *.osim
+          
+          # Проверяем, есть ли изменения
+          if git diff-index --quiet HEAD --; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          
+          # Делаем коммит и пуш
+          git commit -m "Auto-build: Generated ${{ github.event.inputs.version_name }}.osim"
+          git push
