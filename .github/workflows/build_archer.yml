@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version_name:
-        description: 'Имя выходного файла (без расширения)'
+        description: 'Имя выходного файла (без .osim)'
         required: true
         default: 'Archer_Hybrid_v2'
 
@@ -13,19 +13,24 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 1. Скачиваем репозиторий (используем свежую версию)
       - name: Checkout code
-        uses: actions/checkout@v4 # Обновлено до v4
+        uses: actions/checkout@v4
 
+      # 2. Устанавливаем Python (свежая версия)
       - name: Set up Python
-        uses: actions/setup-python@v5 # Обновлено до v5
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.11'
 
-      - name: Create Merge Script
+      # 3. Создаем и запускаем скрипт
+      - name: Run Merge Logic
+        id: merge_step
         run: |
-          cat > merge_script.py << 'EOF'
+          python3 << 'EOF'
           import os
           import re
+          import sys
 
           M7_FILE = "M7_18_Baza.osim"
           M8_FILE = "M8_Caruthers_Scaled_Arms_Corrected_1.osim"
@@ -35,20 +40,27 @@ jobs:
           print(f"--- Starting Build: {OUT_FILE} ---")
 
           if not os.path.exists(M7_FILE):
-              raise Exception(f"Error: {M7_FILE} not found!")
+              print(f"ERROR: {M7_FILE} not found!")
+              sys.exit(1)
           if not os.path.exists(M8_FILE):
-              raise Exception(f"Error: {M8_FILE} not found!")
+              print(f"ERROR: {M8_FILE} not found!")
+              sys.exit(1)
 
           with open(M7_FILE, 'r') as f: m7 = f.read()
           with open(M8_FILE, 'r') as f: m8 = f.read()
 
+          # --- ЛОГИКА ---
           bodies_remove_m7 = ['sacrum', 'pelvis', 'femur_r', 'femur_l', 'tibia_r', 'tibia_l', 
                               'talus_r', 'talus_l', 'calcn_r', 'calcn_l', 'toes_r', 'toes_l', 'patella_r', 'patella_l']
           
           clean_m7 = m7
           for b in bodies_remove_m7:
               pattern = r'<Body\s+name="' + b + r'".*?</Body>'
-              clean_m7 = re.sub(pattern, '', clean_m7, flags=re.DOTALL)
+              if re.search(pattern, clean_m7, flags=re.DOTALL):
+                  clean_m7 = re.sub(pattern, '', clean_m7, flags=re.DOTALL)
+                  print(f"Removed from M7: {b}")
+              else:
+                  print(f"Warning: Body '{b}' not found in M7 to remove.")
 
           joints_remove_m7 = ['ground_pelvis', 'pelvis_sacrum', 'hip_r', 'hip_l', 'knee_r', 'knee_l', 
                               'ankle_r', 'ankle_l', 'subtalar_r', 'subtalar_l', 'mtp_r', 'mtp_l']
@@ -64,50 +76,69 @@ jobs:
               match = re.search(r'(<Body\s+name="' + b + r'".*?</Body>)', m8, re.DOTALL)
               if match:
                   extracted_bodies += "\n\t\t\t" + match.group(1)
+                  print(f"Extracted from M8: {b}")
+              else:
+                  print(f"Warning: Body '{b}' not found in M8.")
 
           joints_keep_m8 = ['ground_pelvis', 'pelvis_sacrum', 'hip_r', 'hip_l', 'knee_r', 'knee_l', 
                             'ankle_r', 'ankle_l', 'subtalar_r', 'subtalar_l', 'mtp_r', 'mtp_l']
           
           extracted_joints = ""
           for j in joints_keep_m8:
+              found = False
               for tag in ['CustomJoint', 'WeldJoint', 'PinJoint', 'BallJoint']:
                   match = re.search(r'(<' + tag + r'\s+name="' + j + r'".*?</' + tag + r'>)', m8, re.DOTALL)
                   if match:
                       extracted_joints += "\n\t\t\t" + match.group(1)
+                      print(f"Extracted joint from M8: {j}")
+                      found = True
                       break
+              if not found:
+                  print(f"Warning: Joint '{j}' not found in M8.")
 
           final_model = clean_m7
+          
           if "</BodySet>" in final_model:
               final_model = final_model.replace("</BodySet>", extracted_bodies + "\n\t\t</BodySet>")
+              print("Injected BodySet.")
+          else:
+              print("ERROR: </BodySet> tag not found in M7!")
+              sys.exit(1)
+              
           if "</JointSet>" in final_model:
               final_model = final_model.replace("</JointSet>", extracted_joints + "\n\t\t</JointSet>")
+              print("Injected JointSet.")
+          else:
+              print("ERROR: </JointSet> tag not found in M7!")
+              sys.exit(1)
 
           with open(OUT_FILE, 'w') as f:
               f.write(final_model)
           
-          print(f"SUCCESS! Created {OUT_FILE}")
+          if os.path.exists(OUT_FILE):
+              size = os.path.getsize(OUT_FILE)
+              print(f"SUCCESS! Created {OUT_FILE} ({size} bytes)")
+              # Создаем файл-флаг, чтобы следующий шаг знал, что всё ок
+              with open("build_success.flag", "w") as f:
+                  f.write("OK")
+          else:
+              print("ERROR: File was not created!")
+              sys.exit(1)
           EOF
 
-      - name: Run Merge Script
-        run: python merge_script.py
-
-      # Явная настройка пользователя Git
-      - name: Configure Git User
+      # 4. Коммит и пуш (только если файл создан)
+      - name: Commit and Push Result
+        if: steps.merge_step.outcome == 'success'
         run: |
           git config --global user.name "GitHub Actions Bot"
           git config --global user.email "actions@github.com"
-
-      # Ручной коммит вместо действия стороннего разработчика (надежнее)
-      - name: Commit and Push Result
-        run: |
+          
           git add *.osim
-          # Проверяем, есть ли изменения
+          
           if git diff-index --quiet HEAD --; then
             echo "No changes to commit."
             exit 0
           fi
+          
           git commit -m "Auto-build: Generated ${{ github.event.inputs.version_name }}.osim"
           git push
-        env:
-          # Токен предоставляется автоматически в среде GitHub Actions
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
