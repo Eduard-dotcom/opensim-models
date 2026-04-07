@@ -8,7 +8,6 @@ on:
         required: true
         default: 'README.md'
 
-# Разрешаем читать файлы
 permissions:
   contents: read
 
@@ -16,36 +15,51 @@ jobs:
   read_and_analyze:
     runs-on: ubuntu-latest
     steps:
-      # 1. Скачиваем ваш репозиторий
       - name: Скачать код
         uses: actions/checkout@v4
 
-      # 2. Читаем файл и сохраняем его содержимое
       - name: Прочитать файл
         id: reader
         run: |
-          CONTENT=$(cat "${{ github.event.inputs.file_path }}" || echo "Файл не найден")
-          # Экранируем содержимое для JSON
-          ESCAPED_CONTENT=$(jq -Rs . <<< "$CONTENT")
-          echo "content=$ESCAPED_CONTENT" >> $GITHUB_OUTPUT
+          if [ -f "${{ github.event.inputs.file_path }}" ]; then
+            # Сохраняем содержимое в файл-временный
+            cat "${{ github.event.inputs.file_path }}" > /tmp/file_content.txt
+            echo "✅ Файл найден"
+          else
+            echo "❌ Файл не найден: ${{ github.event.inputs.file_path }}"
+            exit 1
+          fi
 
-      # 3. Отправляем содержимое в БЕСПЛАТНУЮ нейросеть (OpenRouter)
-      - name: Спросить у ИИ
+      - name: Отправить в нейросеть (упрощённо)
         id: ask_ai
         run: |
+          # Читаем файл и экранируем для JSON
+          CONTENT=$(cat /tmp/file_content.txt | jq -Rs .)
+          
+          # Отправляем запрос
           RESPONSE=$(curl -s -X POST https://openrouter.ai/api/v1/chat/completions \
             -H "Content-Type: application/json" \
-            -d '{
-              "model": "microsoft/phi-3-mini-128k-instruct:free",
-              "messages": [
-                {"role": "system", "content": "Ты — эксперт по коду. Объясни, что делает этот код, простыми словами, на русском языке."},
-                {"role": "user", "content": "Вот содержимое файла: '"${{ steps.reader.outputs.content }}"'"}
+            -d "{
+              \"model\": \"microsoft/phi-3-mini-128k-instruct:free\",
+              \"messages\": [
+                {\"role\": \"system\", \"content\": \"Ты — эксперт по коду. Объясни, что делает этот код, простыми словами, на русском языке. Если это не код, а текст — просто перескажи его.\"},
+                {\"role\": \"user\", \"content\": ${CONTENT}}
               ]
-            }')
-          echo "ai_response=$RESPONSE" >> $GITHUB_OUTPUT
+            }")
+          
+          # Сохраняем ответ
+          echo "$RESPONSE" > /tmp/ai_response.txt
+          echo "✅ Запрос отправлен"
 
-      # 4. Печатаем ответ ИИ в логах (вы его увидите)
       - name: Показать ответ ИИ
         run: |
-          echo "===== ОТВЕТ НЕЙРОСЕТИ ====="
-          echo "${{ steps.ask_ai.outputs.ai_response }}"
+          echo "========================================="
+          echo "📄 АНАЛИЗ ФАЙЛА: ${{ github.event.inputs.file_path }}"
+          echo "========================================="
+          echo ""
+          cat /tmp/ai_response.txt | jq -r '.choices[0].message.content' 2>/dev/null || cat /tmp/ai_response.txt
+          echo ""
+          echo "========================================="
+          echo "🔍 Сырой ответ (если не распарсился):"
+          echo "========================================="
+          cat /tmp/ai_response.txt
