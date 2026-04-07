@@ -1,56 +1,51 @@
-# Это просто название нашей автоматизации, придумайте любое
 name: Простой Анализ Кода
 
-# Говорим: "Запускай эту штуку только когда я нажму кнопку Run workflow вручную"
 on:
   workflow_dispatch:
-    # Создадим окошко, где я смогу вписать имя файла
     inputs:
       file_path:
-        description: 'Напиши путь к файлу (например: src/index.js)'
+        description: 'Путь к файлу (например: README.md)'
         required: true
         default: 'README.md'
 
-# Это магическое разрешение для доступа к нейросетям GitHub Models
+# Разрешаем читать файлы
 permissions:
-  models: read
   contents: read
 
-# Здесь начинается список задач
 jobs:
-  # Задача №1: Прочитать файл и спросить у ИИ
-  read_and_ask_ai:
+  read_and_analyze:
     runs-on: ubuntu-latest
     steps:
-      # Шаг 1: Скачать свежий код из репозитория на временный компьютер (Runner)
-      - name: Забираем код
+      # 1. Скачиваем ваш репозиторий
+      - name: Скачать код
         uses: actions/checkout@v4
 
-      # Шаг 2: Прочитать файл, который я указал при запуске
-      - name: Читаем файл
+      # 2. Читаем файл и сохраняем его содержимое
+      - name: Прочитать файл
         id: reader
-        uses: igorskyflyer/action-readfile@v1.0.0
-        with:
-          path: ${{ github.event.inputs.file_path }}
-
-      # Шаг 3: Спросить у нейросети (GPT-4o), что делает этот код
-      - name: Отправляем запрос в GitHub Models
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          curl "https://models.github.ai/inference/chat/completions" \
-             -H "Content-Type: application/json" \
-             -H "Authorization: Bearer $GITHUB_TOKEN" \
-             -d '{
-               "model": "openai/gpt-4o",
-               "messages": [
-                 {
-                   "role": "system",
-                   "content": "Ты — эксперт по программированию. Объясни, что делает этот код, простыми словами."
-                 },
-                 {
-                   "role": "user",
-                   "content": "Вот содержимое файла '${{ github.event.inputs.file_path }}':\n\n ${{ steps.reader.outputs.content }} \n\n Что здесь происходит?"
-                 }
-               ]
-             }'
+          CONTENT=$(cat "${{ github.event.inputs.file_path }}" || echo "Файл не найден")
+          # Экранируем содержимое для JSON
+          ESCAPED_CONTENT=$(jq -Rs . <<< "$CONTENT")
+          echo "content=$ESCAPED_CONTENT" >> $GITHUB_OUTPUT
+
+      # 3. Отправляем содержимое в БЕСПЛАТНУЮ нейросеть (OpenRouter)
+      - name: Спросить у ИИ
+        id: ask_ai
+        run: |
+          RESPONSE=$(curl -s -X POST https://openrouter.ai/api/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -d '{
+              "model": "microsoft/phi-3-mini-128k-instruct:free",
+              "messages": [
+                {"role": "system", "content": "Ты — эксперт по коду. Объясни, что делает этот код, простыми словами, на русском языке."},
+                {"role": "user", "content": "Вот содержимое файла: '"${{ steps.reader.outputs.content }}"'"}
+              ]
+            }')
+          echo "ai_response=$RESPONSE" >> $GITHUB_OUTPUT
+
+      # 4. Печатаем ответ ИИ в логах (вы его увидите)
+      - name: Показать ответ ИИ
+        run: |
+          echo "===== ОТВЕТ НЕЙРОСЕТИ ====="
+          echo "${{ steps.ask_ai.outputs.ai_response }}"
