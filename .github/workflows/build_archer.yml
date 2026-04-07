@@ -14,12 +14,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4  # Обновлено до v4
-        with:
-          fetch-depth: 0 # Скачиваем всю историю, чтобы git работал корректно
+        uses: actions/checkout@v4 # Обновлено до v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5  # Обновлено до v5
+        uses: actions/setup-python@v5 # Обновлено до v5
         with:
           python-version: '3.9'
 
@@ -86,28 +84,30 @@ jobs:
 
           with open(OUT_FILE, 'w') as f:
               f.write(final_model)
+          
           print(f"SUCCESS! Created {OUT_FILE}")
           EOF
 
       - name: Run Merge Script
         run: python merge_script.py
 
+      # Явная настройка пользователя Git
       - name: Configure Git User
         run: |
           git config --global user.name "GitHub Actions Bot"
           git config --global user.email "actions@github.com"
 
+      # Ручной коммит вместо действия стороннего разработчика (надежнее)
       - name: Commit and Push Result
         run: |
-          # Явно добавляем файл
           git add *.osim
-          
           # Проверяем, есть ли изменения
           if git diff-index --quiet HEAD --; then
             echo "No changes to commit."
             exit 0
           fi
-          
-          # Делаем коммит и пуш
           git commit -m "Auto-build: Generated ${{ github.event.inputs.version_name }}.osim"
           git push
+        env:
+          # Токен предоставляется автоматически в среде GitHub Actions
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
