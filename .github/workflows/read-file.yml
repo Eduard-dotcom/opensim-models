@@ -1,0 +1,56 @@
+# Это просто название нашей автоматизации, придумайте любое
+name: Простой Анализ Кода
+
+# Говорим: "Запускай эту штуку только когда я нажму кнопку Run workflow вручную"
+on:
+  workflow_dispatch:
+    # Создадим окошко, где я смогу вписать имя файла
+    inputs:
+      file_path:
+        description: 'Напиши путь к файлу (например: src/index.js)'
+        required: true
+        default: 'README.md'
+
+# Это магическое разрешение для доступа к нейросетям GitHub Models
+permissions:
+  models: read
+  contents: read
+
+# Здесь начинается список задач
+jobs:
+  # Задача №1: Прочитать файл и спросить у ИИ
+  read_and_ask_ai:
+    runs-on: ubuntu-latest
+    steps:
+      # Шаг 1: Скачать свежий код из репозитория на временный компьютер (Runner)
+      - name: Забираем код
+        uses: actions/checkout@v4
+
+      # Шаг 2: Прочитать файл, который я указал при запуске
+      - name: Читаем файл
+        id: reader
+        uses: igorskyflyer/action-readfile@v1.0.0
+        with:
+          path: ${{ github.event.inputs.file_path }}
+
+      # Шаг 3: Спросить у нейросети (GPT-4o), что делает этот код
+      - name: Отправляем запрос в GitHub Models
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl "https://models.github.ai/inference/chat/completions" \
+             -H "Content-Type: application/json" \
+             -H "Authorization: Bearer $GITHUB_TOKEN" \
+             -d '{
+               "model": "openai/gpt-4o",
+               "messages": [
+                 {
+                   "role": "system",
+                   "content": "Ты — эксперт по программированию. Объясни, что делает этот код, простыми словами."
+                 },
+                 {
+                   "role": "user",
+                   "content": "Вот содержимое файла '${{ github.event.inputs.file_path }}':\n\n ${{ steps.reader.outputs.content }} \n\n Что здесь происходит?"
+                 }
+               ]
+             }'
