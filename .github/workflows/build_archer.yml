@@ -245,3 +245,5 @@ PYTHON_SCRIPT_EOF
             git commit -m "Auto-analysis: Added report and prepared for merge"
             git push
           fi
+
+build_archer.yml
